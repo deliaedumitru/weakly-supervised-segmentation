@@ -9,6 +9,18 @@ import torchmetrics
 color_key = [[255, 255, 255], [0, 0, 255], [0, 255, 255], [0, 255, 0], [255, 255, 0]]
 
 def label_tile(tile, key=color_key, axis=2):
+    """
+    Generates image-level labels from a segmentation map.
+
+    Parameters:
+    tile: input segmentation map
+    key: color key to compare pixel-level labels to
+    axis: color channel axis
+
+    Returns:
+    tuple containing the hard and soft image-level label respectively
+
+    """
     label_hard = [0, 0, 0, 0, 0]
     label_soft = [0., 0., 0., 0., 0.]
     for i in range(len(key)):
@@ -19,7 +31,17 @@ def label_tile(tile, key=color_key, axis=2):
     return label_hard, label_soft
 
 def segmap_rgb_to_classes(segmap_rgb, n_classes=5, normalize_key=False):
+    """
+    Generates a [H,W,num_classes] segmentation map from an RGB image
 
+    Parameters:
+    segmap_rgb: RGB segmentation map
+    n_classes: number of classes
+    normalize_key: set to True if segmap_rgb is a float image
+
+    Returns:
+    [H,W,num_classes] array
+    """
     if normalize_key == True:
         key = np.asarray(color_key) / 255.
     else:
@@ -45,7 +67,16 @@ def segmap_rgb_to_classes(segmap_rgb, n_classes=5, normalize_key=False):
     return segmap_classes
 
 def segmap_classes_to_rgb(segmap_classes, normalize_key=False):
+    """
+    Generates an RGB image from a [H,W,num_classes] segmentation map
 
+    Parameters:
+    segmap_classes: segmentation map
+    normalize_key: set to True if segmap_rgb is a float image
+
+    Returns:
+    [H, W, 3] array
+    """
     if normalize_key == True:
         key = np.asarray(color_key) / 255.
     else:
@@ -71,7 +102,20 @@ def segmap_classes_to_rgb(segmap_classes, normalize_key=False):
 
 
 def gen_tile_ds(img_path, gt_path, save_img_path, save_gt_path, save_labels_hard_path, save_labels_soft_path, tile_w=200, tile_h=200, stride=50):
-    
+    """
+    Extracts and saves tiles of a given size from the high-resolution dataset, as well as soft and hard labels.
+
+    Parameters:
+    img_path: path to the image directory
+    gt_path: path to the ground truth directory
+    save_img_path: path to save the generated image tiles
+    save_gt_path: path to save the generated ground truth tiles
+    save_labels_hard_path: path to the .csv file where hard labels will be saved
+    save_labels_soft_path: path to the .csv file where soft labels will be saved
+    tile_w: tile width
+    tile_h: tile height
+    stride: vertical & horizontal stride used when extracting the tiles
+    """
     os.makedirs(save_img_path, exist_ok=True)
     os.makedirs(save_gt_path, exist_ok=True)
 
@@ -117,27 +161,48 @@ def gen_tile_ds(img_path, gt_path, save_img_path, save_gt_path, save_labels_hard
     print('Done.')
 
 def train(dataloader, model, optimizer, device, loss_fn_strong, loss_fn_weak=None):
+    """"
+    Trains a model using strong+weak or just weak supervision.
+
+    Parameters:
+    dataloader: DataLoader object with the training data
+    model: model to be trained
+    optimizer: optimizer for the training
+    device: 'cuda' or 'cpu'
+    loss_fn_strong: pixel-level segmentation loss function
+    loss_fn_weak: image-level classification loss function
+    """
     size = len(dataloader.dataset)
     weak_loss_coef = 0.3
     for batch, data in enumerate(dataloader):
         img, gt, labels, weak_supervision = data['image'].to(device), data['ground_truth'].to(device), data['labels'].to(device), data['weak_supervision'].to(device)
         pred = model(img)  
         loss_strong = loss_weak = 0
-        if weak_supervision == False:
+        if torch.count_nonzero(weak_supervision.int()) == 0:
             loss_strong = loss_fn_strong(pred, gt)
             if loss_fn_weak:
-                loss_weak = weak_loss_coef*loss_fn_weak(pred, gt, labels, weak_supervision)
+                loss_weak = weak_loss_coef*loss_fn_weak(pred, gt, labels)
         else:
-            loss_weak = weak_loss_coef*loss_fn_weak(pred, gt, labels, weak_supervision)
+            loss_weak = weak_loss_coef*loss_fn_weak(pred, gt, labels)
         loss = loss_strong + loss_weak
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        if batch % 20 == 0:
-            loss_strong, loss_weak, current = loss_strong.item(), loss_weak.item(), batch * len(img)
+        if batch % 50 == 0:
+            loss_strong, loss_weak, current = loss_strong, loss_weak, batch * len(img)
             print(f"Loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
 
 def test(dataloader, model, device, loss_fn_strong, loss_fn_weak=None):
+    """"
+    Evaluates a model using strong+weak or just weak supervision.
+
+    Parameters:
+    dataloader: DataLoader object with the training data
+    model: model to be tested
+    device: 'cuda' or 'cpu'
+    loss_fn_strong: pixel-level segmentation loss function
+    loss_fn_weak: image-level classification loss function
+    """
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     weak_loss_coef=0.3
@@ -148,18 +213,29 @@ def test(dataloader, model, device, loss_fn_strong, loss_fn_weak=None):
             img, gt, labels, weak_supervision = data['image'].to(device), data['ground_truth'].to(device), data['labels'].to(device), data['weak_supervision'].to(device)
             pred = model(img)
             loss_strong = loss_weak = 0
-            if weak_supervision == False:
+            if torch.count_nonzero(weak_supervision.int()) == 0:
                 loss_strong = loss_fn_strong(pred, gt)
                 if loss_fn_weak:
-                    loss_weak = weak_loss_coef*loss_fn_weak(pred, gt, labels, weak_supervision)
+                    loss_weak = weak_loss_coef*loss_fn_weak(pred, gt, labels)
             else:
-                loss_weak = weak_loss_coef*loss_fn_weak(pred, gt, labels, weak_supervision)
+                loss_weak = weak_loss_coef*loss_fn_weak(pred, gt, labels)
             test_loss += loss_strong + loss_weak
     test_loss /= num_batches
     print(f"Average test loss: {test_loss:>8f} \n")
 
 
 def get_metrics(model, dataloader, device):
+    """
+    Computes metrics for a trained model.
+
+    Parameters:
+    model: model to be evaluated
+    dataloader: DataLoader object containing test data
+    device: 'cuda' or 'cpu'
+
+    Returns:
+    Dictionary containing 'accuracy' for the accuracy metric and 'f1_score' for the F1 score
+    """
     accuracy = torchmetrics.Accuracy().to(device)
     f1_score = torchmetrics.F1(mdmc_average='samplewise').to(device)
 
@@ -182,6 +258,17 @@ def get_metrics(model, dataloader, device):
     }
 
 def get_acc_per_class(model, dataloader, device, batch_size=16, n_classes=5):
+    """
+    Computes the accuracy for each individual class.
+
+    Parameters:
+    model: model to be evaluated
+    dataloader: DataLoader object containing test data
+    device: 'cuda' or 'cpu'
+
+    Returns:
+    [n_classes, ] array containing the accuracy for each class.
+    """
     model.to(device)
     model.eval()
     acc_per_class = torch.from_numpy(np.zeros((n_classes,))).to(device)
